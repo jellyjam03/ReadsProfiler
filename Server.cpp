@@ -1,34 +1,19 @@
 #include <iostream>
-#include <unistd.h>
 #include <arpa/inet.h>
-#include <string.h>
-#include <map>
-#include <string>
-#include <pthread.h>
 #include <queue>
+#include <csignal>
+#include "dataBase.h"
+#include "Commands.h"
 
 #define PORT 2728
-#define SERV_BACKLOG 100  //cati clienti pot astepta la rand la port in listen
-#define NR_THREADS 20
-#define LGMAX 100 //lungimea maxima a request-ului trimis de client
+#define SERV_BACKLOG 1000  //cati clienti pot astepta la rand la port in listen
+#define NR_THREADS 4
 
 using namespace std;
 
-typedef char* (*cmdHandle)(const char*);
+map <int, int> isUserLogged;
+set <int> loggedUserIds;
 
-char* myLogin(const char* str);
-char* logout(const char* str);
-char* recommend(const char* str);
-char* download(const char* str);
-char* myRegister(const char* str);
-char* exit(const char* str);
-
-string commands[] = {"login", "logout", "recommend", "download", "register", "exit"};
-map <string, cmdHandle> M = { {"login", myLogin}, {"logout", logout}, {"recommend", recommend},
-                              {"download", download}, {"register", myRegister}, {"exit", exit}
-                            };
-
-map <int, bool> isUserLogged;
 
 struct clientInfo {
   int pclient;
@@ -46,22 +31,29 @@ std::queue<clientInfo*> client_queue;
 
 void* threadFunction(void* arg);
 void handleConnection(clientInfo* pInfo);
-void extract_command(const char* request, char* command);
+void signalHandler(int signum);
 
 /* programul */
 int main ()
 {
   struct sockaddr_in server;	/* structurile pentru server si clienti */
   struct sockaddr_in from;
+  struct timeval tv;		/* structura de timp pentru select() */
   fd_set readfds;		/* multimea descriptorilor de citire */
   fd_set actfds;		/* multimea descriptorilor activi */
-  struct timeval tv;		/* structura de timp pentru select() */
   int sd, client;		/* descriptori de socket */
   int optval=1; 			/* optiune folosita pentru setsockopt()*/ 
   int fd;			/* descriptor folosit pentru 
 				   parcurgerea listelor de descriptori */
   int nfds;			/* numarul maxim de descriptori */
   int len;			/* lungimea structurii sockaddr_in */
+
+  signal(SIGINT, signalHandler);
+
+  if (sqlite3_open("dataBase.db", &myDataBase) != SQLITE_OK) {
+    cout<<"Can't open database.\n";
+    return 0;
+  }
 
   //cream threadurile care for da handle la comenzi
   for (int i = 0; i < NR_THREADS; i++) {
@@ -138,7 +130,7 @@ int main ()
       }
 
       pthread_mutex_lock(&loggedMutex);
-      isUserLogged[client] = 0;
+      isUserLogged[client] = -1;
       pthread_mutex_unlock(&loggedMutex);
 
       if (nfds < client) /* ajusteaza valoarea maximului */
@@ -159,7 +151,7 @@ int main ()
           clientInfo* pInfo = new clientInfo;
           pInfo->pclient = fd;
           bzero(pInfo->request, LGMAX);
-          if (read(fd, pInfo->request, LGMAX) < 0) {
+          if (myRead(fd, pInfo->request, LGMAX) < 0) {
             perror("[server] Eroare la read() de la client.\n");
             continue;
           }
@@ -204,17 +196,17 @@ void handleConnection(clientInfo* pInfo) {
   bzero(response, LGMAX);
   bzero(command, LGMAX);
 
-  extract_command(request, command);
+  extractToken(request, command, 1);
   if (M.find(command) == M.end()) {
-    strcpy(response,"Eroare. Comanda introdusa nu este valida.\n");
+    strcpy(response,"Erorr. Invalid command.\n");
   }
   else {
-    char* presponse = M[command](request);
+    char* presponse = M[command](request, client);
     strcpy(response, presponse);
-    delete presponse;
+    delete[] presponse;
   }
 
-  if (write(client, response, sizeof(response)) < 0)  {
+  if (myWrite(client, response, sizeof(response)) < 0)  {
     perror("[server] Eroare la write() in client.\n");
     return;
   }
@@ -227,67 +219,16 @@ void handleConnection(clientInfo* pInfo) {
   }
 }
 
-char* myLogin(const char* str) {
-  char* response = new char[LGMAX];
-  bzero(response, LGMAX);
-
-  strcpy(response, "Inside login!\n");
-
-  pthread_mutex_lock(&loggedMutex);
-  isUserLogged[client] = 0;
-  pthread_mutex_unlock(&loggedMutex);
-
-  return response;
-}
-
-char* logout(const char* str) {
-  char* response = new char[LGMAX];
-  bzero(response, LGMAX);
-
-  strcpy(response, "Inside logout!\n");
-
-  return response;
-}
-
-char* recommend(const char* str) {
-  char* response = new char[LGMAX];
-  bzero(response, LGMAX);
-
-  strcpy(response, "Inside recommend!\n");
-
-  return response;
-}
-
-char* download(const char* str)  {
-  char* response = new char[LGMAX];
-  bzero(response, LGMAX);
-
-  strcpy(response, "Inside download!\n");
-
-  return response;
-}
-
-char* myRegister(const char* str)  {
-  char* response = new char[LGMAX];
-  bzero(response, LGMAX);
-
-  strcpy(response, "Inside register!\n");
-
-  return response;
-}
-
-char* exit(const char* str) {
-  char* response = new char[LGMAX];
-  bzero(response, LGMAX);
-
+void signalHandler(int signum) {
+  char response[LGMAX] = "";
   strcpy(response, "Server exited!\n");
 
-  return response;
-}
+  pthread_mutex_lock(&loggedMutex);
+  for (auto user = isUserLogged.begin(); user != isUserLogged.end(); user++) {
+    myWrite(user->first, response, LGMAX);
+    close(user->first);
+  }
+  pthread_mutex_unlock(&loggedMutex);
 
-void extract_command(const char* request, char* command)  {
-  int i;
-  for (i = 0; request[i] != ' ' && request[i] != 0; i++)
-    command[i] = request[i];
-  command[i] = '\0';
+  exit(0);
 }
